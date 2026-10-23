@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.log
+*.pid
+*.bak
+patch.py
+url.txt

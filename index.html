@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>US Futures · 실시간 선물 대시보드</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="dot" id="liveDot"></span>
+    <div>
+      <h1>US FUTURES</h1>
+      <p>미국 선물 실시간 모니터</p>
+    </div>
+  </div>
+
+  <div class="session-strip">
+    <span class="badge" id="sessionBadge">—</span>
+    <div class="bar" id="sessionBar" title="CME Globex 하루 사이클 (ET 기준)"></div>
+  </div>
+
+  <div class="clocks">
+    <div><span class="k">KST</span><b id="clockKST">--:--:--</b></div>
+    <div><span class="k">ET</span><b id="clockET">--:--:--</b></div>
+    <div class="sync"><span class="k" id="delayK">지연</span><b id="delayVal" title="선택한 종목의 시세 지연">—</b></div>
+    <div class="sync"><span class="k">수신</span><b id="syncAge">—</b></div>
+  </div>
+</header>
+
+<main>
+  <section class="cards" id="cards" aria-label="지수선물"></section>
+
+  <section class="main">
+    <div class="panel chart-panel">
+      <div class="panel-head">
+        <div class="tabs" id="tabs"></div>
+        <div class="ranges" id="ranges">
+          <button data-range="1d" class="on">1D</button>
+          <button data-range="1mo">1M</button>
+          <button data-range="3mo">3M</button>
+        </div>
+      </div>
+      <div class="chart-meta" id="chartMeta"></div>
+      <div class="chart-wrap">
+        <canvas id="chart"></canvas>
+        <div class="chart-err" id="chartErr" hidden>데이터를 불러오지 못했습니다. 잠시 후 다시 시도합니다.</div>
+      </div>
+    </div>
+
+    <aside class="rail">
+      <div class="panel watch">
+        <div class="panel-head"><h2>관심 종목</h2><span class="hint">5초 갱신</span></div>
+        <div id="watch" class="watch-list"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>한국 시장 연결</h2><span class="hint">참고용</span></div>
+        <div id="korea" class="watch-list"></div>
+        <p class="note" id="koreaNote">—</p>
+      </div>
+    </aside>
+  </section>
+
+  <section class="bottom">
+    <div class="panel">
+      <div class="panel-head"><h2>세션 타임라인</h2><span class="hint">KST · ET</span></div>
+      <ul class="timeline" id="timeline"></ul>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h2>읽는 법</h2><span class="hint">색 · 지연 · 선</span></div>
+      <ul class="readkey">
+        <li><b class="k-up">빨강</b> 상승 / <b class="k-dn">파랑</b> 하락. <span class="dim">색이 진할수록 변동이 큽니다(±1%에서 최대).</span></li>
+        <li><b>지연</b> = 마지막 체결 시각에서 지금까지 흐른 시간. 5초 미만이면 정상, 20초를 넘으면 회색이 아니라 주황·빨강으로 표시합니다.</li>
+        <li><b>가는 실선</b> = 시가(1M·3M에서는 기간 시작가), <b class="k-hi">굵은 빨간선</b> = 최고, <b class="k-lo">굵은 파란선</b> = 최저. 점선은 직전 정산가입니다.</li>
+      </ul>
+      <p class="note">
+        가격은 CME Globex의 최종 체결가이며, 전일 대비는 <b>직전 정산가</b> 기준입니다.
+        무료 소스(시나 파이낸스·네이버 금융)는 실시간에 가깝지만 체결이 뜸한 종목은 지연이 커집니다.
+        선물 만기(롤오버) 주간에는 근월물이 바뀌면서 전일 대비가 왜곡될 수 있습니다.
+      </p>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <span>데이터: Sina Finance · Naver Finance (무료 공개 시세) · 정보 제공용이며 투자 권유가 아닙니다.</span>
+  <span id="footerState">연결 대기</span>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
