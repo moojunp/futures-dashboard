@@ -438,8 +438,8 @@ function drawChart() {
     }
   }
   const areaRef = Math.max(((max - min) / (base || max)) * 100 * 0.9, 0.02);
-  const aUp = 0.05 + 0.25 * strength(upMax, areaRef);
-  const aDn = 0.05 + 0.25 * strength(dnMax, areaRef);
+  const aUp = 0.045 + 0.185 * strength(upMax, areaRef);
+  const aDn = 0.045 + 0.185 * strength(dnMax, areaRef);
   state.areaStrength = { up: strength(upMax, areaRef), dn: strength(dnMax, areaRef) };
   if (base != null) {
     if (yB > yTop) {
