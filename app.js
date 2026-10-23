@@ -46,6 +46,8 @@ const state = {
   lastOk: 0,
   lastFetchAt: 0,
   hoverX: null,
+  barScale: 0,
+  areaStrength: { up: 0, dn: 0 },
 };
 
 /* ── helpers ─────────────────────────────────────────────── */
@@ -82,21 +84,35 @@ const FLAT_RGB = [139, 152, 168];
 const clamp01 = (v) => v < 0 ? 0 : v > 1 ? 1 : v;
 const mix = (a, b, t) => a + (b - a) * t;
 
-/** pct(변동률 %) -> {sign, t(0..1 강도), rgb, rgba(a)} */
-function trend(pct) {
-  const v = (pct == null || !isFinite(pct)) ? 0 : pct;
-  const sign = v > 0 ? 1 : v < 0 ? -1 : 0;
-  const t = sign === 0 ? 0 : clamp01(Math.pow(Math.abs(v) / STRONG_PCT, 0.6));
-  const from = sign > 0 ? UP_WEAK : DOWN_WEAK;
-  const to = sign > 0 ? UP_STRONG : DOWN_STRONG;
-  const rgb = sign === 0 ? FLAT_RGB
-    : [0, 1, 2].map((i) => Math.round(mix(from[i], to[i], t)));
+/** sign(+1/-1/0) + 농도(0..1) -> {sign, t, rgb, css, rgba(a)} */
+function shade(sign, t) {
+  const k = clamp01(t);
+  const from = sign > 0 ? UP_WEAK : sign < 0 ? DOWN_WEAK : FLAT_RGB;
+  const to = sign > 0 ? UP_STRONG : sign < 0 ? DOWN_STRONG : FLAT_RGB;
+  const rgb = [0, 1, 2].map((i) => Math.round(mix(from[i], to[i], k)));
   return {
-    sign, t, rgb,
+    sign, t: k, rgb,
     css: `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`,
     rgba: (a) => `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${a})`,
   };
 }
+
+/** pct(변동률 %) -> {sign, t, rgb, css, rgba} — 카드·스파크라인용(고정 ±1% 스케일) */
+function trend(pct) {
+  const v = (pct == null || !isFinite(pct)) ? 0 : pct;
+  const sign = v > 0 ? 1 : v < 0 ? -1 : 0;
+  return shade(sign, sign === 0 ? 0 : clamp01(Math.pow(Math.abs(v) / STRONG_PCT, 0.6)));
+}
+
+/** 봉별 변동률 목록 -> '강한 봉' 기준값. 상위 15% 지점을 최대 농도로 삼는다. */
+function spikeScale(deltas) {
+  const a = deltas.map(Math.abs).filter((v) => isFinite(v) && v > 0).sort((x, y) => x - y);
+  if (!a.length) return 0.01;
+  return Math.max(a[Math.min(a.length - 1, Math.floor(a.length * 0.85))], 0.004);
+}
+
+/** |값| / 기준 -> 0..1 농도 (지각에 맞게 완만한 곡선) */
+const strength = (v, scale) => clamp01(Math.pow(Math.abs(v) / (scale || 1), 0.7));
 const MARK_HIGH = '#ff5a4d';
 const MARK_LOW = '#3d8bff';
 const MARK_OPEN = '#9fb0c6';
@@ -412,13 +428,26 @@ function drawChart() {
     pts.forEach(([t, v], i) => { const x = X(t), y = Y(v); if (i) c.lineTo(x, y); else c.moveTo(x, y); });
     c.lineTo(lastX, yB); c.lineTo(firstX, yB); c.closePath();
   };
+  // 면적 농도 = 기준선에서 가장 멀리 나간 폭 (보이는 구간 기준으로 눈금을 맞춘다)
+  let upMax = 0, dnMax = 0;
+  if (base != null) {
+    for (const [, v] of pts) {
+      const r = (v / base - 1) * 100;
+      if (r > upMax) upMax = r;
+      if (-r > dnMax) dnMax = -r;
+    }
+  }
+  const areaRef = Math.max(((max - min) / (base || max)) * 100 * 0.9, 0.02);
+  const aUp = 0.05 + 0.25 * strength(upMax, areaRef);
+  const aDn = 0.05 + 0.25 * strength(dnMax, areaRef);
+  state.areaStrength = { up: strength(upMax, areaRef), dn: strength(dnMax, areaRef) };
   if (base != null) {
     if (yB > yTop) {
       c.save();
       c.beginPath(); c.rect(x0, yTop, iw, yB - yTop); c.clip();
       areaPath();
       const g = c.createLinearGradient(0, yTop, 0, Math.max(yB, yTop + 1));
-      g.addColorStop(0, 'rgba(255,62,72,.18)');
+      g.addColorStop(0, `rgba(255,62,72,${aUp.toFixed(3)})`);
       g.addColorStop(1, 'rgba(255,62,72,.015)');
       c.fillStyle = g; c.fill();
       c.restore();
@@ -428,22 +457,27 @@ function drawChart() {
       c.beginPath(); c.rect(x0, yB, iw, yBot - yB); c.clip();
       areaPath();
       const g = c.createLinearGradient(0, Math.min(yB, yBot - 1), 0, yBot);
-      g.addColorStop(0, 'rgba(58,140,255,.17)');
+      g.addColorStop(0, `rgba(58,140,255,${aDn.toFixed(3)})`);
       g.addColorStop(1, 'rgba(58,140,255,.015)');
       c.fillStyle = g; c.fill();
       c.restore();
     }
   }
 
-  // ── 선: 구간마다 기준선 대비 위치로 색과 농도를 정한다 ──
+  // ── 선: 방향은 기준선 위/아래, 농도·굵기는 그 봉의 변동 폭 ──
+  const deltas = [];
+  for (let i = 1; i < pts.length; i++) deltas.push((pts[i][1] / pts[i - 1][1] - 1) * 100);
+  const dScale = spikeScale(deltas);
+  state.barScale = dScale;
   c.lineJoin = 'round'; c.lineCap = 'round';
   for (let i = 1; i < pts.length; i++) {
     const va = pts[i - 1][1], vb = pts[i][1];
     const vm = (va + vb) / 2;
-    const rel = base ? (vm / base - 1) * 100 : 0;
-    const tr = trend(rel);
+    const dp = (vb / va - 1) * 100;
+    const side = base != null ? (vm >= base ? 1 : -1) : (dp >= 0 ? 1 : -1);
+    const tr = shade(side, strength(dp, dScale));
     c.strokeStyle = tr.css;
-    c.lineWidth = 1.15 + 1.1 * tr.t;
+    c.lineWidth = 1.0 + 2.3 * tr.t;
     c.beginPath(); c.moveTo(X(pts[i - 1][0]), Y(va)); c.lineTo(X(pts[i][0]), Y(vb)); c.stroke();
   }
 
@@ -534,7 +568,13 @@ function drawChart() {
       hour: '2-digit', minute: '2-digit', hour12: false,
     }).format(new Date(best[0] * 1000));
     const rel = base ? (best[1] / base - 1) * 100 : null;
-    const txt = `${tf} ET  ${fmtPrice(best[1])}` + (rel != null ? `  ${fmtPct(rel)}` : '');
+    const bi = pts.indexOf(best);
+    let barTxt = '';
+    if (bi > 0) {
+      const dp = (best[1] / pts[bi - 1][1] - 1) * 100;
+      barTxt = `  봉 ${fmtPct(dp)} · 강도 ${Math.round(strength(dp, dScale) * 100)}%`;
+    }
+    const txt = `${tf} ET  ${fmtPrice(best[1])}` + (rel != null ? `  ${fmtPct(rel)}` : '') + barTxt;
     c.font = '11px ui-monospace, monospace';
     const tw = c.measureText(txt).width + 16;
     const bx = Math.min(Math.max(x0 + 6, x + 10), x1 - tw);
@@ -581,6 +621,11 @@ function renderChartMeta() {
       hour: '2-digit', minute: '2-digit', hour12: false,
     }).format(new Date(t * 1000)).replace(',', ''));
   const range = state.view ? `${fmt(state.view.from)} ~ ${fmt(state.view.to)} ET` : '';
+  const sc = state.barScale || 0;
+  const scTxt = sc > 0 ? (sc < 0.1 ? sc.toFixed(3) : sc.toFixed(2)) : null;
+  const scaleTag = scTxt
+    ? `<span class="mk" style="background:transparent;border:1px solid #2a3543;color:#8b98a8" title="이 봉에서 이만큼 움직이면 색 농도 최대">농도 기준 봉 ±${scTxt}%</span>`
+    : '';
 
   meta.innerHTML = `
     <b style="color:#e6edf5;font-size:13px;letter-spacing:.08em">${item.tick}</b>
@@ -593,6 +638,7 @@ function renderChartMeta() {
     <span class="mk"><i style="background:${MARK_LOW}"></i>최저 ${fmtPrice(m.low)}</span>
     <span style="color:#5c6878">${label} ${d.points.length}개 · 보기 ${vis}개</span>
     <span class="mk">${band}</span>
+    ${scaleTag}
     ${range ? `<span style="color:#5c6878">${range}</span>` : ''}
     ${dlyTag}`;
 

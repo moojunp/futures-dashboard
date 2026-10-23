@@ -246,3 +246,18 @@ footer {
 }
 @media (max-width: 720px) { .zoom-hint { display: none; } }
 .chart-panel .panel-head { flex-wrap: wrap; }
+
+/* 색 강도 범례 */
+.intensity-key{
+  display:flex; align-items:center; gap:16px; flex-wrap:wrap;
+  padding:6px 2px 2px; font:11px ui-monospace, monospace; color:#7c8798;
+}
+.intensity-key .lk-title{color:#5c6878; letter-spacing:.08em; text-transform:uppercase; font-size:10px}
+.intensity-key .lk-item{display:inline-flex; align-items:center; gap:6px}
+.intensity-key .lk-item em{font-style:normal; color:#8b98a8; margin-left:2px}
+.intensity-key .grad{
+  display:inline-block; width:58px; height:6px; border-radius:3px;
+  border:1px solid #1c242f;
+}
+.intensity-key .grad-up{background:linear-gradient(90deg, rgb(148,86,94), rgb(255,62,72))}
+.intensity-key .grad-dn{background:linear-gradient(90deg, rgb(82,106,142), rgb(58,140,255))}

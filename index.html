@@ -53,6 +53,11 @@
         <div class="zoom-hint" id="zoomHint">휠 확대·축소 · 드래그 이동 · 더블클릭 전체 구간</div>
         <div class="chart-err" id="chartErr" hidden>데이터를 불러오지 못했습니다. 잠시 후 다시 시도합니다.</div>
       </div>
+      <div class="intensity-key" id="intensityKey" aria-label="색 강도 범례">
+        <span class="lk-title">색 강도</span>
+        <span class="lk-item"><i class="grad grad-up"></i>약 → 강 <em id="lkUp">선 = 봉 변동</em></span>
+        <span class="lk-item"><i class="grad grad-dn"></i>약 → 강 <em id="lkDn">면적 = 기준선 이탈</em></span>
+      </div>
     </div>
 
     <aside class="rail">
@@ -78,7 +83,7 @@
     <div class="panel">
       <div class="panel-head"><h2>읽는 법</h2><span class="hint">색 · 지연 · 선</span></div>
       <ul class="readkey">
-        <li><b class="k-up">빨강</b> = 기준선 위, <b class="k-dn">파랑</b> = 기준선 아래. <span class="dim">기준선에서 멀수록 진해집니다(±1%에서 최대).</span></li>
+        <li><b class="k-up">빨강</b> = 기준선 위, <b class="k-dn">파랑</b> = 기준선 아래. <b>색의 강도</b>는 두 가지입니다: <b>선</b>의 진하기·굵기는 그 봉이 움직인 폭(보이는 구간에서 가장 강한 봉을 최대로 눈금을 맞춤), <b>면적</b>의 진하기는 기준선에서 벗어난 거리. 커서를 올리면 봉 변동과 강도 %가 나옵니다.</li>
         <li><b>기준선</b> = 직전 정산가(일봉은 전일 종가). 점선과 <code>기준</code> 알약으로 표시합니다. 카드의 등락률도 같은 기준입니다.</li>
         <li><b>확대·축소</b>: 마우스 휠, <b>드래그</b>로 이동, <b>더블클릭</b>이면 전체 구간. 우측 버튼 <code>+</code> <code>−</code> <code>전체</code>도 같습니다.</li>
         <li><b>봉 단위</b> 1분~1일. 최소 단위는 <b>1분봉</b>이고, 5·15·30·60분봉은 서버가 1분봉을 묶어 만듭니다.</li>
