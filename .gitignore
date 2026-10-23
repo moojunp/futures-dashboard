@@ -5,3 +5,4 @@ __pycache__/
 *.bak
 patch.py
 url.txt
+data/

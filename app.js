@@ -25,14 +25,24 @@ const KOREA = [
 ];
 
 const QUOTE_MS = 5000;
-const CHART_MS = 20000;
-const STRONG_PCT = 1.0;   // |변동률| 1%에서 색 농도 최대
+const CHART_MS = 10000;
+const STRONG_PCT = 1.0;   // 기준선에서 ±1% 떨어지면 색 농도 최대
+
+const INTERVALS = [
+  { key: '1m',  label: '1분' },
+  { key: '5m',  label: '5분' },
+  { key: '15m', label: '15분' },
+  { key: '30m', label: '30분' },
+  { key: '60m', label: '60분' },
+  { key: '1d',  label: '1일' },
+];
 
 const state = {
   sel: 'ES=F',
-  range: '1d',
+  interval: '1m',
   quotes: {},
   chart: null,
+  view: null,          // 보이는 구간 {from,to} (epoch 초)
   lastOk: 0,
   lastFetchAt: 0,
   hoverX: null,
@@ -250,163 +260,271 @@ function renderRows(list) {
 }
 
 /* ── big chart ───────────────────────────────────────────── */
-function pill(c, x, y, text, bg, above, hMax) {
+/* ── big chart ─────────────────────────────────────────────────
+   기준선 = 직전 정산가(일봉은 전일 종가). 기준선 위는 빨강, 아래는 파랑,
+   기준선에서 멀수록 진하다. 휠 확대·축소 / 드래그 이동 / 더블클릭 전체.
+*/
+const CH = { padL: 8, padR: 68, padT: 14, padB: 24 };
+const MIN_BARS = 8;
+const BASE_COLOR = '#e2e8f0';
+
+function chartGeom() {
+  const cv = $('#chart');
+  const w = cv.clientWidth, h = cv.clientHeight;
+  return { cv, w, h, iw: w - CH.padL - CH.padR, ih: h - CH.padT - CH.padB };
+}
+
+function barSecOf(d) {
+  if (!d) return 60;
+  if (d.interval === '1d') return 86400;
+  return (d.coverage && d.coverage.barSec) || 60;
+}
+
+function lastTs(d) {
+  return (d && d.points && d.points.length) ? d.points[d.points.length - 1][0] : null;
+}
+
+function fullView() {
+  const d = state.chart;
+  if (!d || !d.points || d.points.length < 2) return null;
+  const p = d.points;
+  if (d.interval === '1d') {                   // 일봉은 최근 1년부터 보여 준다
+    const i = Math.max(0, p.length - 260);
+    return { from: p[i][0], to: p[p.length - 1][0] };
+  }
+  return { from: p[0][0], to: p[p.length - 1][0] };
+}
+
+function setView(from, to, redraw) {
+  const d = state.chart;
+  if (!d || !d.points || d.points.length < 2) { state.view = null; return; }
+  const p = d.points;
+  const f0 = p[0][0], f1 = p[p.length - 1][0];
+  const full = f1 - f0;
+  const minSpan = Math.min(full, Math.max(barSecOf(d) * MIN_BARS, 60));
+  const span = Math.min(Math.max(to - from, minSpan), full);
+  const mid = (from + to) / 2;
+  let nf, nt;
+  if (span >= full) { nf = f0; nt = f1; }
+  else {
+    nf = mid - span / 2; nt = mid + span / 2;
+    if (nf < f0) { nt += f0 - nf; nf = f0; }
+    if (nt > f1) { nf -= nt - f1; nt = f1; }
+    nf = Math.max(f0, nf); nt = Math.min(f1, nt);
+  }
+  state.view = { from: nf, to: nt };
+  if (redraw !== false) { drawChart(); renderChartMeta(); }
+}
+
+function sliceVisible(p, view) {
+  if (!view) return p.slice();
+  let lo = 0, hi = p.length - 1;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (p[m][0] < view.from) lo = m + 1; else hi = m; }
+  const i0 = Math.max(0, lo - 1);
+  lo = 0; hi = p.length - 1;
+  while (lo < hi) { const m = (lo + hi + 1) >> 1; if (p[m][0] > view.to) hi = m - 1; else lo = m; }
+  const i1 = Math.min(p.length - 1, lo + 1);
+  return p.slice(i0, i1 + 1);
+}
+
+function placePills(c, items, xRight, top, bottom) {
+  if (!items.length) return;
+  items.sort((a, b) => a.y - b.y);
+  const gap = 17;
+  for (let i = 1; i < items.length; i++) {
+    if (items[i].y - items[i - 1].y < gap) items[i].y = items[i - 1].y + gap;
+  }
+  const over = items[items.length - 1].y - (bottom - 9);
+  if (over > 0) for (const it of items) it.y -= over;
+  for (const it of items) if (it.y < top + 9) it.y = top + 9;
   c.font = '10px ui-monospace, monospace';
-  const tw = c.measureText(text).width + 10;
-  const bh = 15;
-  let by = above ? y - bh - 3 : y + 3;
-  if (by < 2) by = y + 3;                                  // 위로 넘치면 아래로
-  if (hMax && by + bh > hMax - 2) by = y - bh - 3;          // 아래로 넘치면 위로
-  const bx = x - tw;
-  c.fillStyle = bg;
-  c.beginPath();
-  if (c.roundRect) c.roundRect(bx, by, tw, bh, 4); else c.rect(bx, by, tw, bh);
-  c.fill();
-  c.fillStyle = '#0a0d12';
   c.textBaseline = 'middle';
-  c.fillText(text, bx + 5, by + bh / 2 + 0.5);
+  for (const it of items) {
+    const tw = c.measureText(it.text).width + 10, bh = 15;
+    const bx = xRight - tw, by = it.y - bh / 2;
+    c.fillStyle = it.bg;
+    c.beginPath();
+    if (c.roundRect) c.roundRect(bx, by, tw, bh, 4); else c.rect(bx, by, tw, bh);
+    c.fill();
+    c.fillStyle = '#0a0d12';
+    c.fillText(it.text, bx + 5, it.y + 0.5);
+  }
   c.textBaseline = 'top';
 }
 
-function chartMarks(d) {
-  const q = state.quotes[state.sel] || {};
-  if (d.range !== '1d') {
-    const ys = d.points.map((p) => p[1]);
-    return {
-      open: { v: d.points[0][1], label: '기간 시작' },
-      high: { v: Math.max(...ys), label: '기간 최고' },
-      low: { v: Math.min(...ys), label: '기간 최저' },
-    };
-  }
-  const ys = d.points.map((p) => p[1]);
-  const hi = (q.ok && q.high != null) ? q.high : Math.max(...ys);
-  const lo = (q.ok && q.low != null) ? q.low : Math.min(...ys);
-  const op = (q.ok && q.open != null) ? q.open : d.points[0][1];
-  return {
-    open: { v: op, label: '시가' },
-    high: { v: hi, label: '당일 최고' },
-    low: { v: lo, label: '당일 최저' },
-  };
-}
-
 function drawChart() {
-  const cv = $('#chart');
-  const dpr = window.devicePixelRatio || 1;
-  const w = cv.clientWidth, h = cv.clientHeight;
+  const { cv, w, h, iw, ih } = chartGeom();
   if (!w || !h) return;
+  const dpr = window.devicePixelRatio || 1;
   cv.width = w * dpr; cv.height = h * dpr;
   const c = cv.getContext('2d');
   c.setTransform(dpr, 0, 0, dpr, 0, 0);
   c.clearRect(0, 0, w, h);
 
+  const padL = CH.padL, padT = CH.padT;
   const d = state.chart;
-  const padL = 8, padR = 68, padT = 12, padB = 24;
-  const iw = w - padL - padR, ih = h - padT - padB;
 
   if (!d || !d.points || d.points.length < 2) {
     c.fillStyle = '#5c6878'; c.font = '12px ui-monospace, monospace';
+    c.textBaseline = 'top';
     c.fillText('차트 데이터를 기다리는 중…', padL + 8, padT + 22);
     return;
   }
+  if (!state.view) state.view = fullView();
+  const view = state.view;
+  const pts = sliceVisible(d.points, view);
+  if (pts.length < 2) return;
 
-  const pts = d.points;
+  const base = (d.prev != null && isFinite(d.prev)) ? d.prev : null;
+  const m = d.marks || {};
   const ys = pts.map((p) => p[1]);
-  const marks = chartMarks(d);
   let min = Math.min(...ys), max = Math.max(...ys);
-  for (const k of ['open', 'high', 'low']) {
-    const v = marks[k].v;
-    if (v != null && isFinite(v)) { min = Math.min(min, v); max = Math.max(max, v); }
-  }
-  if (d.prev) { min = Math.min(min, d.prev); max = Math.max(max, d.prev); }
-  const pad = (max - min) * 0.12 || Math.max(0.01, max * 0.001);
+  const span0 = (max - min) || Math.max(0.01, Math.abs(max) * 0.0004);
+  const near = (v) => v != null && isFinite(v) && v > min - 1.6 * span0 && v < max + 1.6 * span0;
+  for (const k of ['open', 'high', 'low']) if (near(m[k])) { min = Math.min(min, m[k]); max = Math.max(max, m[k]); }
+  if (base != null && near(base)) { min = Math.min(min, base); max = Math.max(max, base); }
+  const pad = (max - min) * 0.10 || 0.01;
   min -= pad; max += pad;
-  const t0 = pts[0][0], t1 = pts[pts.length - 1][0];
+
+  const t0 = view.from, t1 = view.to;
   const X = (t) => padL + ((t - t0) / (t1 - t0 || 1)) * iw;
   const Y = (v) => padT + (1 - (v - min) / (max - min || 1)) * ih;
+  const x0 = padL, x1 = padL + iw, yTop = padT, yBot = padT + ih;
 
+  // 격자 + y축 눈금
   c.font = '10px ui-monospace, monospace';
   c.textBaseline = 'middle';
   for (let i = 0; i <= 4; i++) {
     const v = min + ((max - min) * i) / 4;
     const y = Y(v);
     c.strokeStyle = '#161d27'; c.lineWidth = 1;
-    c.beginPath(); c.moveTo(padL, y); c.lineTo(padL + iw, y); c.stroke();
+    c.beginPath(); c.moveTo(x0, y); c.lineTo(x1, y); c.stroke();
     c.fillStyle = '#5c6878';
-    c.fillText(fmtPrice(v), padL + iw + 8, y);
+    c.fillText(fmtPrice(v), x1 + 8, y);
   }
 
-  if (d.prev) {
-    const y = Y(d.prev);
-    c.save(); c.setLineDash([4, 4]); c.strokeStyle = 'rgba(140,152,168,.45)';
-    c.beginPath(); c.moveTo(padL, y); c.lineTo(padL + iw, y); c.stroke(); c.restore();
-    c.fillStyle = '#8b98a8';
-    c.fillText('전일', padL + iw + 8, y - 11);
+  const firstX = X(pts[0][0]), lastX = X(pts[pts.length - 1][0]);
+  const yB = base != null ? Y(base) : null;
+
+  // ── 기준선 위는 빨강, 아래는 파랑 (면적을 기준선에서 자른다) ──
+  const areaPath = () => {
+    c.beginPath();
+    pts.forEach(([t, v], i) => { const x = X(t), y = Y(v); if (i) c.lineTo(x, y); else c.moveTo(x, y); });
+    c.lineTo(lastX, yB); c.lineTo(firstX, yB); c.closePath();
+  };
+  if (base != null) {
+    if (yB > yTop) {
+      c.save();
+      c.beginPath(); c.rect(x0, yTop, iw, yB - yTop); c.clip();
+      areaPath();
+      const g = c.createLinearGradient(0, yTop, 0, Math.max(yB, yTop + 1));
+      g.addColorStop(0, 'rgba(255,62,72,.18)');
+      g.addColorStop(1, 'rgba(255,62,72,.015)');
+      c.fillStyle = g; c.fill();
+      c.restore();
+    }
+    if (yB < yBot) {
+      c.save();
+      c.beginPath(); c.rect(x0, yB, iw, yBot - yB); c.clip();
+      areaPath();
+      const g = c.createLinearGradient(0, Math.min(yB, yBot - 1), 0, yBot);
+      g.addColorStop(0, 'rgba(58,140,255,.17)');
+      g.addColorStop(1, 'rgba(58,140,255,.015)');
+      c.fillStyle = g; c.fill();
+      c.restore();
+    }
   }
 
-  // ── 시작가(시가) 선 ──
-  const yH = (marks.high.v != null && isFinite(marks.high.v)) ? Y(marks.high.v) : padT;
-  const yL = (marks.low.v != null && isFinite(marks.low.v)) ? Y(marks.low.v) : padT + ih;
-  if (marks.open.v != null && isFinite(marks.open.v)) {
-    const y = Y(marks.open.v);
-    const above = Math.abs(y - yL) < 22 && Math.abs(y - yH) >= 22;
-    c.strokeStyle = 'rgba(159,176,198,.72)'; c.lineWidth = 1.4;
-    c.beginPath(); c.moveTo(padL, y); c.lineTo(padL + iw, y); c.stroke();
-    pill(c, padL + iw - 2, y, `${marks.open.label} ${fmtPrice(marks.open.v)}`, MARK_OPEN, above, padT + ih);
+  // ── 선: 구간마다 기준선 대비 위치로 색과 농도를 정한다 ──
+  c.lineJoin = 'round'; c.lineCap = 'round';
+  for (let i = 1; i < pts.length; i++) {
+    const va = pts[i - 1][1], vb = pts[i][1];
+    const vm = (va + vb) / 2;
+    const rel = base ? (vm / base - 1) * 100 : 0;
+    const tr = trend(rel);
+    c.strokeStyle = tr.css;
+    c.lineWidth = 1.15 + 1.1 * tr.t;
+    c.beginPath(); c.moveTo(X(pts[i - 1][0]), Y(va)); c.lineTo(X(pts[i][0]), Y(vb)); c.stroke();
   }
 
-  // ── 최고 / 최저 굵은 선 ──
-  if (marks.high.v != null && isFinite(marks.high.v)) {
-    const y = Y(marks.high.v);
-    c.strokeStyle = MARK_HIGH; c.lineWidth = 2.8;
-    c.beginPath(); c.moveTo(padL, y); c.lineTo(padL + iw, y); c.stroke();
-    pill(c, padL + iw - 2, y, `${marks.high.label} ${fmtPrice(marks.high.v)}`, MARK_HIGH, true, padT + ih);
-  }
-  if (marks.low.v != null && isFinite(marks.low.v)) {
-    const y = Y(marks.low.v);
-    c.strokeStyle = MARK_LOW; c.lineWidth = 2.8;
-    c.beginPath(); c.moveTo(padL, y); c.lineTo(padL + iw, y); c.stroke();
-    pill(c, padL + iw - 2, y, `${marks.low.label} ${fmtPrice(marks.low.v)}`, MARK_LOW, false, padT + ih);
+  const pills = [];
+
+  // ── 기준선(직전 정산가) ──
+  if (base != null) {
+    const yy = Math.max(yTop, Math.min(yBot, yB));
+    c.save();
+    c.setLineDash([5, 4]);
+    c.strokeStyle = 'rgba(226,232,240,.5)';
+    c.lineWidth = 1.3;
+    c.beginPath(); c.moveTo(x0, yy); c.lineTo(x1, yy); c.stroke();
+    c.restore();
+    const inside = yB >= yTop - 1 && yB <= yBot + 1;
+    pills.push({
+      y: inside ? yB : (yB < yTop ? yTop + 9 : yBot - 9),
+      text: (yB < yTop ? '↑ 기준 ' : yB > yBot ? '↓ 기준 ' : '기준 ') + fmtPrice(base),
+      bg: BASE_COLOR,
+    });
   }
 
+  // ── 시가 / 최고 / 최저 ──
+  const line = (v, color, width, dash) => {
+    const y = Y(v);
+    c.save();
+    if (dash) c.setLineDash(dash);
+    c.strokeStyle = color; c.lineWidth = width;
+    c.beginPath(); c.moveTo(x0, y); c.lineTo(x1, y); c.stroke();
+    c.restore();
+  };
+  if (m.open != null && near(m.open)) {
+    line(m.open, 'rgba(159,176,198,.62)', 1.4);
+    pills.push({ y: Y(m.open), text: `시가 ${fmtPrice(m.open)}`, bg: MARK_OPEN });
+  }
+  if (m.high != null && near(m.high)) {
+    line(m.high, MARK_HIGH, 2.8);
+    pills.push({ y: Y(m.high), text: `최고 ${fmtPrice(m.high)}`, bg: MARK_HIGH });
+  }
+  if (m.low != null && near(m.low)) {
+    line(m.low, MARK_LOW, 2.8);
+    pills.push({ y: Y(m.low), text: `최저 ${fmtPrice(m.low)}`, bg: MARK_LOW });
+  }
+  placePills(c, pills, x1 - 2, yTop, yBot);
+
+  // ── x축 눈금 ──
   c.textBaseline = 'top'; c.fillStyle = '#5c6878';
+  c.font = '10px ui-monospace, monospace';
+  const spanSec = t1 - t0;
   const nTicks = Math.min(6, Math.max(2, Math.floor(iw / 130)));
-  const tz = { timeZone: 'America/New_York' };
   for (let i = 0; i <= nTicks; i++) {
-    const t = t0 + ((t1 - t0) * i) / nTicks;
-    const label = d.range === '1d'
-      ? new Intl.DateTimeFormat('en-GB', { ...tz, hour: '2-digit', minute: '2-digit' }).format(new Date(t * 1000))
-      : new Intl.DateTimeFormat('en-US', { ...tz, month: '2-digit', day: '2-digit' }).format(new Date(t * 1000));
-    c.fillText(label, Math.min(Math.max(X(t) - 14, padL), padL + iw - 28), padT + ih + 7);
+    const t = t0 + (spanSec * i) / nTicks;
+    let label;
+    if (d.interval === '1d') {
+      label = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' })
+        .format(new Date(t * 1000));
+    } else {
+      const o = { timeZone: 'America/New_York', hour12: false, hour: '2-digit', minute: '2-digit' };
+      if (spanSec > 86400) { o.month = '2-digit'; o.day = '2-digit'; }
+      label = new Intl.DateTimeFormat('en-US', o).format(new Date(t * 1000));
+    }
+    c.fillText(label, Math.min(Math.max(X(t) - 16, x0), x1 - 40), yBot + 7);
   }
 
+  // ── 마지막 점 ──
   const last = pts[pts.length - 1];
-  const base = d.prev || pts[0][1];
-  const tr = trend(base ? (last[1] / base - 1) * 100 : 0);
-  const g = c.createLinearGradient(0, padT, 0, padT + ih);
-  g.addColorStop(0, tr.rgba(0.08 + 0.18 * tr.t));
-  g.addColorStop(1, 'rgba(0,0,0,0)');
-  c.beginPath();
-  pts.forEach(([t, v], i) => (i ? c.lineTo(X(t), Y(v)) : c.moveTo(X(t), Y(v))));
-  c.lineTo(X(t1), padT + ih); c.lineTo(X(t0), padT + ih); c.closePath();
-  c.fillStyle = g; c.fill();
+  const lastRel = base ? (last[1] / base - 1) * 100 : 0;
+  const lastTr = trend(lastRel);
+  c.beginPath(); c.arc(X(last[0]), Y(last[1]), 3.2, 0, Math.PI * 2);
+  c.fillStyle = lastTr.css; c.fill();
 
-  c.beginPath();
-  pts.forEach(([t, v], i) => (i ? c.lineTo(X(t), Y(v)) : c.moveTo(X(t), Y(v))));
-  c.strokeStyle = tr.css;
-  c.lineWidth = 1.2 + 1.2 * tr.t; c.lineJoin = 'round'; c.stroke();
-
-  c.beginPath(); c.arc(X(last[0]), Y(last[1]), 3, 0, Math.PI * 2);
-  c.fillStyle = tr.css; c.fill();
-
-  if (state.hoverX != null && state.hoverX >= padL && state.hoverX <= padL + iw) {
-    const ratio = (state.hoverX - padL) / iw;
-    const t = t0 + ratio * (t1 - t0);
+  // ── 크로스헤어 ──
+  if (state.hoverX != null && state.hoverX >= x0 && state.hoverX <= x1) {
+    const ratio = (state.hoverX - x0) / iw;
+    const t = t0 + ratio * spanSec;
     let best = pts[0], bd = Infinity;
     for (const p of pts) { const dd = Math.abs(p[0] - t); if (dd < bd) { bd = dd; best = p; } }
     const x = X(best[0]), y = Y(best[1]);
-    c.save(); c.setLineDash([3, 3]); c.strokeStyle = 'rgba(230,237,245,.35)';
-    c.beginPath(); c.moveTo(x, padT); c.lineTo(x, padT + ih); c.stroke();
-    c.beginPath(); c.moveTo(padL, y); c.lineTo(padL + iw, y); c.stroke();
+    c.save(); c.setLineDash([3, 3]); c.strokeStyle = 'rgba(230,237,245,.35)'; c.lineWidth = 1;
+    c.beginPath(); c.moveTo(x, yTop); c.lineTo(x, yBot); c.stroke();
+    c.beginPath(); c.moveTo(x0, y); c.lineTo(x1, y); c.stroke();
     c.restore();
     c.beginPath(); c.arc(x, y, 3.5, 0, Math.PI * 2);
     c.fillStyle = '#e6edf5'; c.fill();
@@ -415,16 +533,17 @@ function drawChart() {
       timeZone: 'America/New_York', month: '2-digit', day: '2-digit',
       hour: '2-digit', minute: '2-digit', hour12: false,
     }).format(new Date(best[0] * 1000));
-    const txt = `${tf} ET  ${fmtPrice(best[1])}`;
+    const rel = base ? (best[1] / base - 1) * 100 : null;
+    const txt = `${tf} ET  ${fmtPrice(best[1])}` + (rel != null ? `  ${fmtPct(rel)}` : '');
     c.font = '11px ui-monospace, monospace';
     const tw = c.measureText(txt).width + 16;
-    const bx = Math.min(Math.max(padL + 6, x + 10), padL + iw - tw);
-    c.fillStyle = 'rgba(17,22,30,.96)'; c.strokeStyle = '#2a3543';
+    const bx = Math.min(Math.max(x0 + 6, x + 10), x1 - tw);
+    c.fillStyle = 'rgba(17,22,30,.96)'; c.strokeStyle = '#2a3543'; c.lineWidth = 1;
     c.beginPath();
-    if (c.roundRect) c.roundRect(bx, padT + 4, tw, 21, 5); else c.rect(bx, padT + 4, tw, 21);
+    if (c.roundRect) c.roundRect(bx, yTop + 4, tw, 21, 5); else c.rect(bx, yTop + 4, tw, 21);
     c.fill(); c.stroke();
     c.fillStyle = '#e6edf5'; c.textBaseline = 'middle';
-    c.fillText(txt, bx + 8, padT + 15);
+    c.fillText(txt, bx + 8, yTop + 15);
     c.textBaseline = 'top';
   }
 }
@@ -436,26 +555,52 @@ function renderChartMeta() {
   const q = state.quotes[state.sel] || {};
   const dly = delayOf(q);
   const dlyTag = `<span class="mk"><i class="dl-dot" style="background:${delayColor(dly)}"></i>지연 ${fmtDelay(dly)}</span>`;
+  const g = (d && d.granularity) || {};
+  const band = '최소 ' + (g.chartMinLabel || '1분');
+
   if (!d || !d.points || !d.points.length) {
     meta.innerHTML = `<b style="color:#e6edf5;font-size:13px;letter-spacing:.08em">${item.tick}</b>
-      <span style="color:#5c6878">${item.ko}</span><span style="color:#5c6878">데이터 없음</span>${dlyTag}`;
+      <span style="color:#5c6878">${item.ko}</span>
+      <span style="color:#5c6878">데이터 없음</span>
+      <span class="mk">${band}</span>${dlyTag}`;
     return;
   }
+
   const last = d.points[d.points.length - 1][1];
-  const delta = d.prev ? last - d.prev : null;
-  const pct = d.prev ? (delta / d.prev) * 100 : null;
+  const base = d.prev;
+  const delta = base != null ? last - base : null;
+  const pct = base ? (delta / base) * 100 : null;
   const tr = trend(pct);
-  const mk = chartMarks(d);
+  const m = d.marks || {};
+  const label = d.interval === '1d' ? '일봉' : `${d.intervalLabel}봉`;
+  const vis = state.view ? sliceVisible(d.points, state.view).length : d.points.length;
+  const fmt = (t) => (d.interval === '1d'
+    ? new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date(t * 1000))
+    : new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hour12: false,
+    }).format(new Date(t * 1000)).replace(',', ''));
+  const range = state.view ? `${fmt(state.view.from)} ~ ${fmt(state.view.to)} ET` : '';
+
   meta.innerHTML = `
     <b style="color:#e6edf5;font-size:13px;letter-spacing:.08em">${item.tick}</b>
     <span style="color:#5c6878">${item.ko}</span>
     <span class="big" style="color:${tr.css}">${fmtPrice(last)}</span>
     <span style="color:${tr.css}">${fmtNum(delta)} ${fmtPct(pct)}</span>
-    <span style="color:#5c6878">${d.interval} · ${d.points.length}개</span>
-    <span class="mk"><i style="background:${MARK_OPEN}"></i>${mk.open.label} ${fmtPrice(mk.open.v)}</span>
-    <span class="mk"><i style="background:${MARK_HIGH}"></i>${mk.high.label} ${fmtPrice(mk.high.v)}</span>
-    <span class="mk"><i style="background:${MARK_LOW}"></i>${mk.low.label} ${fmtPrice(mk.low.v)}</span>
+    <span class="mk"><i style="background:${BASE_COLOR}"></i>기준 ${fmtPrice(base)}</span>
+    <span class="mk"><i style="background:${MARK_OPEN}"></i>시가 ${fmtPrice(m.open)}</span>
+    <span class="mk"><i style="background:${MARK_HIGH}"></i>최고 ${fmtPrice(m.high)}</span>
+    <span class="mk"><i style="background:${MARK_LOW}"></i>최저 ${fmtPrice(m.low)}</span>
+    <span style="color:#5c6878">${label} ${d.points.length}개 · 보기 ${vis}개</span>
+    <span class="mk">${band}</span>
+    ${range ? `<span style="color:#5c6878">${range}</span>` : ''}
     ${dlyTag}`;
+
+  const mu = $('#minUnit');
+  if (mu) {
+    mu.textContent = band;
+    mu.title = (g.note || '') + (g.tradeGap ? ` · 관측된 체결 갱신 간격 ${g.tradeGap}초` : '');
+  }
 }
 
 /* ── panels ──────────────────────────────────────────────── */
@@ -617,15 +762,28 @@ function renderKoreaNote() {
 async function loadChart() {
   const err = $('#chartErr');
   try {
-    const r = await fetch(api(`/api/chart?symbol=${encodeURIComponent(state.sel)}&range=${state.range}`), { cache: 'no-store' });
+    const r = await fetch(api(`/api/chart?symbol=${encodeURIComponent(state.sel)}&interval=${state.interval}`),
+      { cache: 'no-store' });
     const j = await r.json();
     if (!j.ok) throw new Error(j.error || 'chart error');
+    const prevLast = lastTs(state.chart);
     state.chart = j;
     err.hidden = true;
+    const newLast = lastTs(j);
+    if (!state.view) {
+      state.view = fullView();
+    } else if (prevLast != null && newLast != null && state.view.to >= prevLast - barSecOf(j)) {
+      // 오른쪽 끝(실시간)을 보고 있었으면 새 봉까지 따라간다
+      const span = state.view.to - state.view.from;
+      setView(newLast - span, newLast, false);
+    } else {
+      setView(state.view.from, state.view.to, false);
+    }
     renderChartMeta(); drawChart();
   } catch (e) {
     err.hidden = false;
     state.chart = null;
+    state.view = null;
     renderChartMeta();
   }
 }
@@ -640,33 +798,98 @@ function buildTabs() {
       state.sel = it.sym;
       document.querySelectorAll('#tabs button').forEach((x) => x.classList.remove('on'));
       b.classList.add('on');
-      state.chart = null; loadChart();
+      state.chart = null; state.view = null; loadChart();
     };
     host.appendChild(b);
   });
 }
-function wireRanges() {
-  document.querySelectorAll('#ranges button').forEach((b) => {
+function buildIntervals() {
+  const host = $('#intervals');
+  host.innerHTML = '';
+  INTERVALS.forEach((it) => {
+    const b = el('button', it.key === state.interval ? 'on' : '', it.label);
+    b.dataset.interval = it.key;
+    b.title = it.key === '1d'
+      ? '일봉 · 최근 5년(휠로 확대)'
+      : `${it.label}봉 · Sina 1분봉을 묶어 생성`;
     b.onclick = () => {
-      document.querySelectorAll('#ranges button').forEach((x) => x.classList.remove('on'));
+      if (state.interval === it.key) return;
+      state.interval = it.key;
+      host.querySelectorAll('button').forEach((x) => x.classList.remove('on'));
       b.classList.add('on');
-      state.range = b.dataset.range;
-      state.chart = null; loadChart();
+      state.chart = null; state.view = null;
+      loadChart();
     };
+    host.appendChild(b);
   });
 }
-function wireHover() {
+
+function wireChart() {
   const cv = $('#chart');
-  cv.addEventListener('mousemove', (e) => {
-    state.hoverX = e.clientX - cv.getBoundingClientRect().left;
-    drawChart();
+
+  document.querySelectorAll('#zoom button').forEach((b) => {
+    b.onclick = () => {
+      const v = state.view || fullView();
+      if (!v) return;
+      const mode = b.dataset.zoom;
+      if (mode === 'reset') { state.view = fullView(); drawChart(); renderChartMeta(); return; }
+      const mid = (v.from + v.to) / 2, span = v.to - v.from;
+      const k = mode === 'in' ? 0.6 : 1.65;
+      setView(mid - (span * k) / 2, mid + (span * k) / 2);
+    };
   });
-  cv.addEventListener('mouseleave', () => { state.hoverX = null; drawChart(); });
+
+  cv.addEventListener('wheel', (e) => {
+    if (!state.chart) return;
+    e.preventDefault();
+    const v = state.view || fullView();
+    if (!v) return;
+    const rect = cv.getBoundingClientRect();
+    const { iw } = chartGeom();
+    const ratio = clamp01((e.clientX - rect.left - CH.padL) / (iw || 1));
+    const span = v.to - v.from;
+    const k = e.deltaY < 0 ? 0.78 : 1.28;
+    const anchor = v.from + span * ratio;
+    setView(anchor - (anchor - v.from) * k, anchor + (v.to - anchor) * k);
+  }, { passive: false });
+
+  let drag = null;
+  cv.addEventListener('pointerdown', (e) => {
+    if (!state.chart) return;
+    const v = state.view || fullView();
+    if (!v) return;
+    drag = { x: e.clientX, v };
+    cv.setPointerCapture(e.pointerId);
+    cv.style.cursor = 'grabbing';
+  });
+  cv.addEventListener('pointermove', (e) => {
+    const rect = cv.getBoundingClientRect();
+    state.hoverX = e.clientX - rect.left;
+    if (drag) {
+      const { iw } = chartGeom();
+      const dt = ((drag.x - e.clientX) * (drag.v.to - drag.v.from)) / (iw || 1);
+      setView(drag.v.from + dt, drag.v.to + dt);
+    } else {
+      drawChart();
+    }
+  });
+  cv.addEventListener('pointerup', () => {
+    if (drag) { drag = null; cv.style.cursor = 'crosshair'; drawChart(); }
+  });
+  cv.addEventListener('pointerleave', () => {
+    if (!drag) { state.hoverX = null; drawChart(); }
+  });
+  cv.addEventListener('dblclick', () => {
+    state.view = fullView();
+    drawChart(); renderChartMeta();
+  });
+  cv.style.cursor = 'crosshair';
+  cv.title = '휠 확대·축소 · 드래그 이동 · 더블클릭 전체 구간';
 }
 
 async function start() {
   buildCards(); buildRows(WATCH, '#watch'); buildRows(KOREA, '#korea');
-  buildTabs(); wireRanges(); wireHover();
+  buildTabs(); buildIntervals(); wireChart();
   renderSession(); renderTimeline(); tickClocks();
   await resolveApi();
   loadQuotes(); loadChart();

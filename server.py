@@ -41,14 +41,21 @@ NAVER_FX = {"USDKRW": "FX_USDKRW"}
 SPARK_SYMBOLS = ["ES=F", "NQ=F", "YM=F", "VIX=F"]
 
 QUOTE_TTL = 4.0
-SPARK_TTL = 90.0
+SPARK_TTL = 60.0
 NAVER_TTL = 10.0
 CHART_TTL = 20.0
+
+# 봉 단위. 1d만 일봉이고 나머지는 1분봉을 묶어 만든다.
+INTERVALS = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "60m": 60, "1d": 0}
+INTERVAL_LABEL = {"1m": "1분", "5m": "5분", "15m": "15분",
+                  "30m": "30분", "60m": "60분", "1d": "일봉"}
+RANGE_ALIAS = {"1d": "1m", "1m": "1m", "1mo": "1d", "3mo": "1d"}
 
 _lock = threading.Lock()
 _quotes = {}        # page symbol -> (at, payload)
 _sparks = {}        # page symbol -> (at, [prices])
-_charts = {}        # (sym, range) -> (at, payload)
+_charts = {}        # (sym, interval) -> (at, payload)
+_trade_gap = {}     # page symbol -> [최근 체결시각 간격(초)]  (실제 갱신 주기 관측)
 
 
 # ── http helpers ────────────────────────────────────────────
@@ -164,6 +171,13 @@ def pull_sina():
             if not q:
                 continue
             q["source"] = "Sina"
+            # 체결 시각이 실제로 몇 초마다 새로 찍히는지 관측한다 (수집 주기와 별개).
+            old = _quotes.get(sym)
+            if old and q.get("ts") and old[1].get("ts") and q["ts"] > old[1]["ts"]:
+                gap = q["ts"] - old[1]["ts"]
+                if 0 < gap <= 3600:
+                    _trade_gap.setdefault(sym, []).append(gap)
+                    del _trade_gap[sym][:-40]
             _quotes[sym] = (now, q)
             got += 1
     return f"sina ok {got}/{len(SINA)}" if got else "sina: empty"
@@ -215,8 +229,64 @@ def _jsonp_payload(text):
     return json.loads(text[i + 1:j])
 
 
+# ── 1분봉 누적 저장 ──────────────────────────────────────────
+# Sina는 글로벌선물에 "1분봉(당일 세션)"과 "일봉"만 준다. 5/15/30/60분봉은
+# 1분봉을 묶어 만들고, 세션이 지날 때마다 1분봉을 파일에 쌓아 이어 붙인다.
+MIN_FILE = os.path.join(ROOT, "data", "minutes.json")
+MIN_KEEP_DAYS = 20
+_min = {}                       # sym -> [[ts, price], ...] 오름차순
+_min_dirty = False
+_min_lock = threading.Lock()
+
+
+def load_minutes():
+    global _min
+    try:
+        with open(MIN_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        _min = {k: [[int(p[0]), float(p[1])] for p in v] for k, v in raw.items()}
+    except Exception:  # noqa: BLE001
+        _min = {}
+
+
+def save_minutes():
+    global _min_dirty
+    with _min_lock:
+        if not _min_dirty:
+            return
+        snap = dict(_min)
+        _min_dirty = False
+    try:
+        os.makedirs(os.path.dirname(MIN_FILE), exist_ok=True)
+        tmp = MIN_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(snap, f, separators=(",", ":"))
+        os.replace(tmp, MIN_FILE)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def store_minutes(sym, pts):
+    """1분봉을 기존 저장분에 합친다 (ts 기준 멱등)."""
+    global _min_dirty
+    if not pts:
+        return
+    cutoff = time.time() - MIN_KEEP_DAYS * 86400
+    with _min_lock:
+        merged = {t: p for t, p in (_min.get(sym) or [])}
+        for t, p in pts:
+            merged[int(t)] = float(p)
+        _min[sym] = [[t, merged[t]] for t in sorted(merged) if t >= cutoff]
+        _min_dirty = True
+
+
+def minute_series(sym):
+    with _min_lock:
+        return [[t, p] for t, p in (_min.get(sym) or [])]
+
+
 def sina_minline(sym):
-    """1-minute closes for the current Globex session (today, Beijing time)."""
+    """1-minute closes for the current Globex session (Beijing day)."""
     code = SINA[sym].replace("hf_", "")
     url = ("https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var%20_t=/"
            f"GlobalFuturesService.getGlobalFuturesMinLine?symbol={code}")
@@ -225,10 +295,13 @@ def sina_minline(sym):
     rows = data.get("minLine_1d") or []
     pts = []
     for row in rows:
-        if len(row) < 2:
+        # 첫 줄만 [날짜, 직전정산, "cme", "", "06:00", 현재가, 0, 0, 평균가, 시각]
+        if len(row) >= 10:
+            price, stamp = _f(row[5]), row[9]
+        elif len(row) >= 6:
+            price, stamp = _f(row[1]), row[5]
+        else:
             continue
-        price = _f(row[1])
-        stamp = row[-1] if len(row) >= 6 else ""
         try:
             dt = datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S").replace(tzinfo=CST)
         except Exception:  # noqa: BLE001
@@ -239,7 +312,7 @@ def sina_minline(sym):
 
 
 def sina_daily(sym, days=70):
-    """daily closes; Sina returns the whole contract history, so take the tail."""
+    """일봉 OHLC; Sina는 계약 전 역사를 주므로 뒤에서 잘라 쓴다."""
     code = SINA[sym].replace("hf_", "")
     url = ("https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var%20_t=/"
            f"GlobalFuturesService.getGlobalFuturesDailyKLine?symbol={code}")
@@ -251,29 +324,92 @@ def sina_daily(sym, days=70):
         if c is None:
             continue
         dt = datetime.strptime(r["date"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        pts.append([int(dt.timestamp()), c])
+        pts.append([int(dt.timestamp()), c, _f(r.get("open")),
+                    _f(r.get("high")), _f(r.get("low"))])
     return pts
 
 
-def chart(sym, rng):
-    key = (sym, rng)
+def aggregate(pts, minutes):
+    """1분봉 -> N분봉. 각 구간의 마지막 가격을 쓴다."""
+    if minutes <= 1:
+        return [[p[0], p[1]] for p in pts]
+    step = minutes * 60
+    out = []
+    for p in pts:
+        ts, px = p[0], p[1]
+        b = ts - (ts % step)
+        if out and out[-1][0] == b:
+            out[-1][1] = px
+        else:
+            out.append([b, px])
+    return out
+
+
+def granularity(sym=None):
+    with _lock:
+        gaps = sorted(_trade_gap.get(sym) or [])
+    tick = gaps[len(gaps) // 2] if gaps else None
+    return {
+        "chartMin": "1m",
+        "chartMinLabel": "1분",
+        "native": ["1분봉", "일봉"],
+        "derived": ["5분", "15분", "30분", "60분"],
+        "quoteStamp": "1초",
+        "quotePoll": QUOTE_TTL,
+        "tradeGap": tick,
+        "note": ("차트 데이터의 최소 단위는 1분봉(Sina). 시세 체결 시각은 초 단위까지 "
+                 "오지만 서버가 %.0f초마다 받으므로 화면 갱신은 그보다 촘촘할 수 없다."
+                 % QUOTE_TTL),
+    }
+
+
+def chart(sym, interval="1m"):
+    if interval not in INTERVALS:
+        interval = "1m"
+    key = (sym, interval)
+    ttl = 60.0 if interval == "1d" else 8.0
     now = time.time()
     with _lock:
         hit = _charts.get(key)
-        if hit and now - hit[0] < CHART_TTL:
+        if hit and now - hit[0] < ttl:
             return hit[1]
     if sym not in SINA or SINA[sym].startswith("gb_"):
         raise ValueError("no series for " + sym)
-    if rng == "1d":
-        pts = sina_minline(sym)
-        interval = "1분"
-    else:
-        pts = sina_daily(sym, 30 if rng == "1mo" else 95)
-        interval = "일봉"
+
     with _lock:
-        prev = (_quotes.get(sym) or (0, {}))[1].get("prev")
-    out = {"ok": True, "symbol": sym, "range": rng, "interval": interval,
-           "points": pts, "prev": prev, "price": pts[-1][1] if pts else None}
+        q = (_quotes.get(sym) or (0, {}))[1]
+
+    if interval == "1d":
+        rows = sina_daily(sym, 2600)
+        pts = rows[-1500:]
+        prev = rows[-2][1] if len(rows) > 1 else q.get("prev")
+        last = rows[-1] if rows else None
+        marks = {"open": last[2] if last else None,
+                 "high": last[3] if last else None,
+                 "low": last[4] if last else None}
+    else:
+        live = []
+        try:
+            live = sina_minline(sym)
+        except Exception:  # noqa: BLE001
+            pass
+        if live:
+            store_minutes(sym, live)
+        series = minute_series(sym) or live
+        pts = aggregate(series, INTERVALS[interval])
+        pts = pts[-6000:] if interval == "1m" else pts[-4000:]
+        prev = q.get("prev") or (pts[0][1] if pts else None)
+        marks = {"open": q.get("open"), "high": q.get("high"), "low": q.get("low")}
+
+    cover = {"from": pts[0][0] if pts else None,
+             "to": pts[-1][0] if pts else None,
+             "points": len(pts),
+             "barSec": 86400 if interval == "1d" else INTERVALS[interval] * 60}
+    out = {"ok": True, "symbol": sym, "interval": interval,
+           "intervalLabel": INTERVAL_LABEL[interval],
+           "points": pts, "prev": prev, "marks": marks,
+           "price": pts[-1][1] if pts else None,
+           "granularity": granularity(sym), "coverage": cover}
     with _lock:
         _charts[key] = (time.time(), out)
     return out
@@ -371,8 +507,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, "serverTime": int(time.time()),
                                    "quotes": quotes_for(syms)})
             if u.path == "/api/chart":
-                return self._json(chart(qs.get("symbol", ["ES=F"])[0],
-                                        qs.get("range", ["1d"])[0]))
+                iv = qs.get("interval", [""])[0]
+                if not iv:
+                    iv = RANGE_ALIAS.get(qs.get("range", ["1m"])[0], "1m")
+                return self._json(chart(qs.get("symbol", ["ES=F"])[0], iv))
+            if u.path == "/api/granularity":
+                return self._json({"ok": True,
+                                   "granularity": granularity(qs.get("symbol", [""])[0] or None),
+                                   "intervals": list(INTERVALS),
+                                   "labels": INTERVAL_LABEL})
             if u.path == "/healthz":
                 with _lock:
                     return self._json({"ok": True, "quotes": sorted(_quotes),
@@ -395,6 +538,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8770
+    load_minutes()
     threading.Thread(target=refresh_loop, name="refresher", daemon=True).start()
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"dashboard on http://0.0.0.0:{port}", flush=True)

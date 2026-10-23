@@ -37,15 +37,20 @@
     <div class="panel chart-panel">
       <div class="panel-head">
         <div class="tabs" id="tabs"></div>
-        <div class="ranges" id="ranges">
-          <button data-range="1d" class="on">1D</button>
-          <button data-range="1mo">1M</button>
-          <button data-range="3mo">3M</button>
+        <div class="chart-tools">
+          <div class="ranges" id="intervals" aria-label="봉 단위"></div>
+          <div class="zoom" id="zoom">
+            <button data-zoom="in" title="확대 (마우스 휠 올리기)">+</button>
+            <button data-zoom="out" title="축소 (마우스 휠 내리기)">−</button>
+            <button data-zoom="reset" title="전체 구간 (더블클릭)">전체</button>
+          </div>
+          <span class="minunit" id="minUnit" title="데이터가 실제로 들어오는 최소 단위">최소 1분</span>
         </div>
       </div>
       <div class="chart-meta" id="chartMeta"></div>
       <div class="chart-wrap">
         <canvas id="chart"></canvas>
+        <div class="zoom-hint" id="zoomHint">휠 확대·축소 · 드래그 이동 · 더블클릭 전체 구간</div>
         <div class="chart-err" id="chartErr" hidden>데이터를 불러오지 못했습니다. 잠시 후 다시 시도합니다.</div>
       </div>
     </div>
@@ -73,14 +78,18 @@
     <div class="panel">
       <div class="panel-head"><h2>읽는 법</h2><span class="hint">색 · 지연 · 선</span></div>
       <ul class="readkey">
-        <li><b class="k-up">빨강</b> 상승 / <b class="k-dn">파랑</b> 하락. <span class="dim">색이 진할수록 변동이 큽니다(±1%에서 최대).</span></li>
-        <li><b>지연</b> = 마지막 체결 시각에서 지금까지 흐른 시간. 5초 미만이면 정상, 20초를 넘으면 회색이 아니라 주황·빨강으로 표시합니다.</li>
-        <li><b>가는 실선</b> = 시가(1M·3M에서는 기간 시작가), <b class="k-hi">굵은 빨간선</b> = 최고, <b class="k-lo">굵은 파란선</b> = 최저. 점선은 직전 정산가입니다.</li>
+        <li><b class="k-up">빨강</b> = 기준선 위, <b class="k-dn">파랑</b> = 기준선 아래. <span class="dim">기준선에서 멀수록 진해집니다(±1%에서 최대).</span></li>
+        <li><b>기준선</b> = 직전 정산가(일봉은 전일 종가). 점선과 <code>기준</code> 알약으로 표시합니다. 카드의 등락률도 같은 기준입니다.</li>
+        <li><b>확대·축소</b>: 마우스 휠, <b>드래그</b>로 이동, <b>더블클릭</b>이면 전체 구간. 우측 버튼 <code>+</code> <code>−</code> <code>전체</code>도 같습니다.</li>
+        <li><b>봉 단위</b> 1분~1일. 최소 단위는 <b>1분봉</b>이고, 5·15·30·60분봉은 서버가 1분봉을 묶어 만듭니다.</li>
+        <li><b>가는 실선</b> = 시가, <b class="k-hi">굵은 빨간선</b> = 최고, <b class="k-lo">굵은 파란선</b> = 최저(일봉에서는 마지막 날 값).</li>
+        <li><b>지연</b> = 마지막 체결 시각에서 지금까지. 5초 미만 정상, 20초를 넘으면 주황·빨강으로 표시합니다.</li>
       </ul>
       <p class="note">
-        가격은 CME Globex의 최종 체결가이며, 전일 대비는 <b>직전 정산가</b> 기준입니다.
-        무료 소스(시나 파이낸스·네이버 금융)는 실시간에 가깝지만 체결이 뜸한 종목은 지연이 커집니다.
-        선물 만기(롤오버) 주간에는 근월물이 바뀌면서 전일 대비가 왜곡될 수 있습니다.
+        데이터 단위: 차트 시계열은 <b>1분봉</b>이 최소(Sina 글로벌선물 API), 일봉은 2016년부터 옵니다.
+        시세 체결 시각은 <b>초 단위</b>까지 오지만 서버가 <b>4초</b>마다 받고 화면은 <b>5초</b>마다 그리므로,
+        그보다 잘게는 볼 수 없습니다. 무료 소스(시나 파이낸스·네이버 금융)라 체결이 뜸한 종목은 지연이 커지고,
+        선물 만기(롤오버) 주간에는 근월물 교체로 전일 대비가 왜곡될 수 있습니다.
       </p>
     </div>
   </section>

@@ -222,3 +222,27 @@ footer {
   display: flex; justify-content: space-between; gap: 12px;
   font-size: 11px; color: var(--tx-3);
 }
+
+/* ── chart toolbar: 봉 단위 · 확대 · 최소 단위 ─────────────── */
+.chart-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.chart-tools .ranges { display: flex; gap: 4px; }
+.zoom { display: flex; gap: 3px; }
+.zoom button {
+  background: #161d27; color: var(--tx-2); border: 1px solid var(--line);
+  font-family: var(--mono); font-size: 11px; padding: 5px 9px;
+  border-radius: 7px; cursor: pointer; transition: .15s; line-height: 1.2;
+}
+.zoom button:hover { color: var(--tx); border-color: var(--line-2); }
+.minunit {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .02em;
+  color: #9dbdff; background: rgba(76,141,255,.10);
+  border: 1px solid rgba(76,141,255,.32);
+  padding: 4px 9px; border-radius: 999px; white-space: nowrap; cursor: help;
+}
+.zoom-hint {
+  position: absolute; left: 10px; top: 7px; z-index: 2;
+  font-family: var(--mono); font-size: 10.5px; color: #46505e;
+  pointer-events: none; user-select: none;
+}
+@media (max-width: 720px) { .zoom-hint { display: none; } }
+.chart-panel .panel-head { flex-wrap: wrap; }
