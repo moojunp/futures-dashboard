@@ -323,7 +323,9 @@ def sina_daily(sym, days=70):
         c = _f(r.get("close"))
         if c is None:
             continue
-        dt = datetime.strptime(r["date"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        # 날짜만 오므로 UTC 정오로 찍는다. 자정으로 찍으면 ET로 표시할 때
+        # 하루 전 날짜(전날 20:00)로 보인다.
+        dt = datetime.strptime(r["date"], "%Y-%m-%d").replace(tzinfo=timezone.utc, hour=12)
         pts.append([int(dt.timestamp()), c, _f(r.get("open")),
                     _f(r.get("high")), _f(r.get("low"))])
     return pts
@@ -433,9 +435,15 @@ def refresh_sparks():
 def refresh_loop():
     last_naver = 0.0
     last_spark = 0.0
+    last_save = 0.0
     while True:
         t0 = time.time()
         pull_sina()
+        # 1분봉 누적분을 주기적으로 디스크에 내려 둔다. 이게 없으면 서버를
+        # 다시 띄울 때 세션 이력이 통째로 사라진다.
+        if t0 - last_save > 60:
+            last_save = t0
+            save_minutes()
         if t0 - last_naver > NAVER_TTL:
             last_naver = t0
             pull_naver()

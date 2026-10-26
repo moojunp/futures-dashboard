@@ -772,11 +772,21 @@ async function resolveApi() {
   return '';
 }
 
+/* 백엔드는 죽었다 살아나고 터널 주소도 바뀐다. 실패한 페이지가 새로고침 없이
+   영영 죽어 있는 일이 없도록, 실패할 때마다 주소를 다시 찾는다(25초에 한 번). */
+let lastResolveAt = 0;
+async function reResolve() {
+  if (Date.now() - lastResolveAt < 25000) return API;
+  await resolveApi();
+  return API;
+}
+
 /* ── data ────────────────────────────────────────────────── */
 const ALL = [...INDEX.map((x) => x.sym), ...WATCH.map((x) => x.sym), ...KOREA.map((x) => x.sym)];
 
 async function loadQuotes() {
   try {
+    if (!API) await reResolve();
     const r = await fetch(api('/api/quotes?symbols=' + encodeURIComponent(ALL.join(','))), { cache: 'no-store' });
     const j = await r.json();
     if (!j.ok) throw new Error(j.error || 'api error');
@@ -791,6 +801,7 @@ async function loadQuotes() {
   } catch (e) {
     setDot('err');
     $('#footerState').textContent = '서버 연결 실패: ' + e.message;
+    reResolve();
   }
 }
 
@@ -831,6 +842,7 @@ async function loadChart() {
     state.chart = null;
     state.view = null;
     renderChartMeta();
+    reResolve();
   }
 }
 
