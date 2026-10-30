@@ -58,6 +58,98 @@ _charts = {}        # (sym, interval) -> (at, payload)
 _trade_gap = {}     # page symbol -> [최근 체결시각 간격(초)]  (실제 갱신 주기 관측)
 
 
+# ── 실시간 틱 누적 ──────────────────────────────────────────
+# Sina 시세는 체결 시각을 초 단위로 주지만 시계열 API 는 1분봉까지만 준다.
+# 서버가 QUOTE_TTL(4초)마다 받는 시세를 그대로 쌓아 초 단위 곡선을 만든다.
+TICK_SYMBOLS = {"ES=F", "NQ=F", "YM=F", "VIX=F"}
+TICK_FILE = os.path.join(ROOT, "data", "ticks.json")
+TICK_KEEP_H = float(os.environ.get("TICK_KEEP_H", "12"))
+_ticks = {}          # sym -> [[ts, price], ...] 오름차순
+_tick_gap = {}       # sym -> [관측된 체결 간격(초)]
+_tick_dirty = False
+_tick_lock = threading.Lock()
+
+
+def load_ticks():
+    global _ticks
+    try:
+        with open(TICK_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        _ticks = {k: [[int(p[0]), float(p[1])] for p in v] for k, v in raw.items()
+                  if k in TICK_SYMBOLS}
+    except Exception:  # noqa: BLE001
+        _ticks = {}
+
+
+def save_ticks():
+    global _tick_dirty
+    with _tick_lock:
+        if not _tick_dirty:
+            return
+        snap = {k: [list(p) for p in v] for k, v in _ticks.items()}
+        _tick_dirty = False
+    try:
+        os.makedirs(os.path.dirname(TICK_FILE), exist_ok=True)
+        tmp = TICK_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(snap, f, separators=(",", ":"))
+        os.replace(tmp, TICK_FILE)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def store_tick(sym, q):
+    """체결 시각(초) 기준으로 틱을 쌓는다. 같은 초는 마지막 값으로 덮는다."""
+    global _tick_dirty
+    if sym not in TICK_SYMBOLS:
+        return
+    ts, px = q.get("ts"), q.get("price")
+    if not ts or px is None:
+        return
+    ts = int(ts)
+    cutoff = time.time() - TICK_KEEP_H * 3600
+    with _tick_lock:
+        arr = _ticks.setdefault(sym, [])
+        if arr and arr[-1][0] == ts:
+            arr[-1][1] = float(px)
+            _tick_dirty = True
+            return
+        if arr and ts < arr[-1][0]:
+            return                       # 시계 역행(휴장 중 잔여 시각)은 버린다
+        if arr:
+            gap = ts - arr[-1][0]
+            if 0 < gap <= 3600:
+                g = _tick_gap.setdefault(sym, [])
+                g.append(gap)
+                del g[:-60]
+        arr.append([ts, float(px)])
+        if arr[0][0] < cutoff:
+            _ticks[sym] = [p for p in arr if p[0] >= cutoff]
+        _tick_dirty = True
+
+
+def tick_series(sym, minutes=720, since=None):
+    cutoff = time.time() - max(1, minutes) * 60
+    with _tick_lock:
+        arr = _ticks.get(sym) or []
+        if since:
+            pts = [list(p) for p in arr if p[0] > since]
+        else:
+            pts = [list(p) for p in arr if p[0] >= cutoff]
+        gaps = sorted(_tick_gap.get(sym) or [])
+    res = gaps[len(gaps) // 2] if gaps else None
+    return pts, res
+
+
+def tick_meta(sym):
+    with _tick_lock:
+        arr = _ticks.get(sym) or []
+        first = arr[0][0] if arr else None
+        last = arr[-1][0] if arr else None
+        n = len(arr)
+    return {"points": n, "from": first, "to": last}
+
+
 # ── http helpers ────────────────────────────────────────────
 def _get(url, referer=None, tries=3, timeout=10):
     last = None
@@ -179,6 +271,7 @@ def pull_sina():
                     _trade_gap.setdefault(sym, []).append(gap)
                     del _trade_gap[sym][:-40]
             _quotes[sym] = (now, q)
+            store_tick(sym, q)
             got += 1
     return f"sina ok {got}/{len(SINA)}" if got else "sina: empty"
 
@@ -444,6 +537,7 @@ def refresh_loop():
         if t0 - last_save > 60:
             last_save = t0
             save_minutes()
+            save_ticks()
         if t0 - last_naver > NAVER_TTL:
             last_naver = t0
             pull_naver()
@@ -519,6 +613,15 @@ class Handler(BaseHTTPRequestHandler):
                 if not iv:
                     iv = RANGE_ALIAS.get(qs.get("range", ["1m"])[0], "1m")
                 return self._json(chart(qs.get("symbol", ["ES=F"])[0], iv))
+            if u.path == "/api/ticks":
+                sym = qs.get("symbol", ["ES=F"])[0]
+                mins = int(_f(qs.get("minutes", ["720"])[0], 720) or 720)
+                since = _f(qs.get("since", [""])[0], None)
+                since = int(since) if since else None
+                pts, res = tick_series(sym, mins, since)
+                return self._json({"ok": True, "symbol": sym, "points": pts,
+                                   "resolution": res, "keepHours": TICK_KEEP_H,
+                                   "total": tick_meta(sym)})
             if u.path == "/api/granularity":
                 return self._json({"ok": True,
                                    "granularity": granularity(qs.get("symbol", [""])[0] or None),
@@ -547,6 +650,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8770
     load_minutes()
+    load_ticks()
     threading.Thread(target=refresh_loop, name="refresher", daemon=True).start()
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"dashboard on http://0.0.0.0:{port}", flush=True)
